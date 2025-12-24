@@ -1,20 +1,24 @@
 import streamlit as st
-import base64
-from openai import OpenAI
+import google.generativeai as genai
 import pdfplumber
+from PIL import Image
+import io
+import json
 
-# Konfigurera sidan för mobilen
-st.set_page_config(page_title="Min AI-Inköpslista", page_icon="🛒")
+# --- KONFIGURATION ---
+st.set_page_config(page_title="Gemini Inköpslista", page_icon="🛒")
+st.title("🛒 Inköpslista (Powered by Gemini)")
 
-# Titel
-st.title("🛒 AI-Inköpslistan")
-st.write("Fota kylen -> Få inköpslista baserat på kostschemat.")
-
-# Hämta API-nyckel från inställningar (secrets)
-api_key = st.secrets["OPENAI_API_KEY"]
-client = OpenAI(api_key=api_key)
+# Hämta API-nyckel från Secrets
+try:
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    genai.configure(api_key=api_key)
+except Exception:
+    st.error("Ingen API-nyckel hittades. Lägg in GOOGLE_API_KEY i Streamlit Secrets.")
+    st.stop()
 
 # --- FUNKTIONER ---
+
 def extract_text_from_pdf(pdf_file):
     text = ""
     with pdfplumber.open(pdf_file) as pdf:
@@ -22,67 +26,80 @@ def extract_text_from_pdf(pdf_file):
             text += page.extract_text() or ""
     return text
 
-def analyze_fridge(image_bytes, diet_text, days):
-    # Koda bilden till base64
-    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+def analyze_fridge_gemini(image_bytes, diet_text, days):
+    # Gemini vill ha bilden som ett PIL-objekt, inte base64
+    image = Image.open(io.BytesIO(image_bytes))
     
-    # Din System-Prompt (Här klistrar vi in den vi skapade tidigare)
-    system_prompt = """
-    Du är en expert på nutrition. Analysera bilden på kylskåpet och jämför med kostschemat.
-    1. Identifiera vad som finns.
-    2. Jämför med behovet för angivet antal dagar.
-    3. Skapa en inköpslista sorterad efter butikens avdelningar.
-    Anta att kryddor och olja finns hemma.
+    # Välj modell (Flash är snabb och bra, Pro är ännu smartare)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt = f"""
+    Du är en expert på kost och logistik.
+    1. Titta på bilden av kylskåpet.
+    2. Läs kostschemat nedan.
+    3. Räkna ut vad som saknas för {days} dagar.
+    
+    KOSTSCHEMA:
+    {diet_text}
+    
+    INSTRUKTIONER:
+    - Ignorera basvaror som kryddor och olja.
+    - Svara ENDAST med ett JSON-objekt. Inget annat prat.
+    - Format: {{"Kategori": ["Vara 1", "Vara 2"]}}
     """
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user", 
-                "content": [
-                    {"type": "text", "text": f"Planera för {days} dagar. Här är kostschemat: {diet_text}"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]
-            }
-        ],
-        max_tokens=1500
+    # Skicka bild och text till modellen
+    # generation_config tvingar svaret att vara JSON
+    response = model.generate_content(
+        [prompt, image],
+        generation_config={"response_mime_type": "application/json"}
     )
-    return response.choices[0].message.content
+    
+    # Returnera som Python-dictionary
+    return json.loads(response.text)
 
-# --- APPENS GRÄNSSNITT ---
+# --- APPENS LOGIK ---
 
-# 1. Ladda upp kostschema (Görs en gång, eller varje gång om du byter schema)
-st.subheader("1. Ditt Kostschema")
-uploaded_pdf = st.file_uploader("Ladda upp PDF", type="pdf")
+if 'shopping_list' not in st.session_state:
+    st.session_state.shopping_list = None
+
+st.subheader("1. Ladda upp Kostschema")
+uploaded_pdf = st.file_uploader("PDF-fil", type="pdf")
 
 if uploaded_pdf:
-    # Extrahera text direkt när filen laddas upp
-    diet_plan_text = extract_text_from_pdf(uploaded_pdf)
-    st.success("✅ Kostschema inläst!")
+    diet_text = extract_text_from_pdf(uploaded_pdf)
+    st.success("✅ Schema inläst")
     
-    # 2. Välj antal dagar
-    days = st.slider("Hur många dagar ska du handla för?", 1, 7, 3)
+    days = st.slider("Antal dagar", 1, 7, 3)
 
-    # 3. Kameran
     st.subheader("2. Fota Kylen")
-    # enable_events=True gör att den reagerar direkt när bilden tas
-    camera_image = st.camera_input("Ta en bild på innehållet")
+    camera_image = st.camera_input("Ta bild")
 
     if camera_image:
-        with st.spinner("🤖 AI:n analyserar din kyl och räknar kalorier..."):
-            # Läs in bilden från kameran
-            bytes_data = camera_image.getvalue()
-            
-            # Skicka till AI
-            shopping_list = analyze_fridge(bytes_data, diet_plan_text, days)
-            
-            # Visa resultatet
-            st.markdown("---")
-            st.subheader("Din Inköpslista")
-            st.markdown(shopping_list)
-            
-            # Knapp för att kopiera eller ladda ner kan läggas till här
+        if st.button("Skapa lista med Gemini ✨"):
+            with st.spinner("Gemini tittar i kylen..."):
+                try:
+                    bytes_data = camera_image.getvalue()
+                    st.session_state.shopping_list = analyze_fridge_gemini(bytes_data, diet_text, days)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ett fel uppstod: {e}")
+
+    # Visa resultat
+    if st.session_state.shopping_list:
+        st.write("---")
+        st.header("Din Checklista")
+        
+        if st.button("Rensa"):
+            st.session_state.shopping_list = None
+            st.rerun()
+
+        data = st.session_state.shopping_list
+        for category, items in data.items():
+            if items:
+                st.subheader(category)
+                for item in items:
+                    st.checkbox(item, key=f"{category}-{item}")
+
 else:
-    st.info("Börja med att ladda upp ditt kostschema (PDF).")
+    st.info("Ladda upp PDF först.")
