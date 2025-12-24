@@ -31,7 +31,7 @@ def analyze_fridge_gemini(image_bytes, diet_text, days):
     image = Image.open(io.BytesIO(image_bytes))
     
     # Välj modell (Flash är snabb och bra, Pro är ännu smartare)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash-lastest')
     
     prompt = f"""
     Du är en expert på kost och logistik.
@@ -103,3 +103,4 @@ if uploaded_pdf:
 
 else:
     st.info("Ladda upp PDF först.")
+
